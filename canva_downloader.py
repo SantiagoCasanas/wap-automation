@@ -19,7 +19,9 @@ import zipfile
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
-from playwright_stealth import stealth_sync
+from playwright_stealth import Stealth
+
+stealth = Stealth()
 
 logger = logging.getLogger(__name__)
 
@@ -405,7 +407,7 @@ def download_pages(canva_url: str, headless: bool = True) -> list[str]:
         )
 
         page = context.new_page()
-        stealth_sync(page)
+        stealth.apply_stealth_sync(page)
 
         try:
             page.goto(edit_url, wait_until="domcontentloaded", timeout=60000)
@@ -470,7 +472,7 @@ def setup_canva_login():
         )
 
         page = context.new_page()
-        stealth_sync(page)
+        stealth.apply_stealth_sync(page)
         page.goto("https://www.canva.com/login", wait_until="domcontentloaded")
 
         logger.info("Waiting for login... (will wait up to 5 minutes)")
