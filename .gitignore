@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+
+# Environment
+.env
+
+# Browser session data (WhatsApp Web)
+browser_data/
+
+# Downloaded images
+downloads/
+
+# Logs
+*.log
