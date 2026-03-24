@@ -1,12 +1,13 @@
 # Canva to WhatsApp Status Automation
 
-Automatically downloads every page of a Canva design as JPG images via the **Canva Connect API** and publishes each one as a WhatsApp status. Designed to run daily at **12:00 AM Colombian time** — it re-downloads the design each run, so any changes you make in Canva are reflected automatically.
+Automatically downloads **visible pages** of a Canva design as JPG images and publishes each one as a WhatsApp status. Uses a hybrid approach: Playwright detects which pages are visible (skipping hidden ones), then the Canva Connect API exports only those pages. Designed to run daily at **12:00 AM Colombian time** — it re-downloads the design each run, so any changes you make in Canva are reflected automatically.
 
 ## How It Works
 
-1. **Canva Download**: Uses the [Canva Connect API](https://www.canva.dev) to export all pages of a design as JPG. No browser automation needed — the API handles the export directly.
-2. **WhatsApp Posting**: Opens WhatsApp Web via Playwright with a persistent session, navigates to the Status tab, and uploads each image as a status update.
-3. **Scheduling**: A cron job runs the script daily at 12:00 AM Colombian time (05:00 UTC).
+1. **Page Detection**: Opens the Canva editor via Playwright (headless) to detect which pages are visible vs hidden.
+2. **Canva Export**: Uses the [Canva Connect API](https://www.canva.dev) to export only the visible pages as JPG.
+3. **WhatsApp Posting**: Opens WhatsApp Web via Playwright with a persistent session, navigates to the Status tab, and uploads each image as a status update.
+4. **Scheduling**: A cron job runs the script daily at 12:00 AM Colombian time (05:00 UTC).
 
 ## Prerequisites
 
@@ -21,13 +22,14 @@ Automatically downloads every page of a Canva design as JPG images via the **Can
 ```
 wap-automation/
 ├── main.py                # Entry point and orchestrator
-├── canva_downloader.py    # Downloads Canva design pages via the Connect API
+├── canva_downloader.py    # Detects visible pages (Playwright) + exports via API
 ├── wap_status_poster.py   # Posts images to WhatsApp status via WhatsApp Web
 ├── setup.sh               # Installation script
 ├── requirements.txt       # Python dependencies
 ├── .env.example           # Configuration template
 ├── .env                   # Your configuration (not tracked in git)
 ├── canva_tokens.json      # Canva API tokens (not tracked in git)
+├── canva_browser_data/    # Canva login session (not tracked in git)
 ├── browser_data/          # WhatsApp Web session (not tracked in git)
 └── downloads/             # Temporary image storage (not tracked in git)
 ```
@@ -81,17 +83,17 @@ DELAY_BETWEEN_STATUSES=5
 HEADLESS=true
 ```
 
-### Step 5: Authorize the Canva API (one-time)
+### Step 5: Authorize Canva (one-time)
 
 ```bash
 python main.py --setup-canva
 ```
 
 **What happens:**
-1. A URL is printed in the terminal (and opens in your browser automatically if possible)
-2. Sign in to Canva and authorize the integration
-3. You're redirected back to `localhost` where the script captures the authorization code
-4. Tokens are saved to `canva_tokens.json` — they refresh automatically on future runs
+1. **OAuth flow**: A URL is printed in the terminal (opens in your browser automatically). Sign in to Canva and authorize the integration. Tokens are saved to `canva_tokens.json`.
+2. **Browser login**: A Chromium window opens so you can log in to Canva. This session (saved to `canva_browser_data/`) is used to detect which pages are visible in your design.
+
+Both steps happen automatically during `--setup-canva`.
 
 ### Step 6: First-time WhatsApp Web login
 
@@ -181,6 +183,13 @@ crontab -l
 - If tokens become invalid, run `python main.py --setup-canva` to re-authorize.
 - **Do not** commit `canva_tokens.json` — it contains your API credentials.
 
+### Canva Browser Session
+
+- The browser session (`canva_browser_data/`) is used to detect visible/hidden pages in the editor.
+- If the session expires, run `python main.py --setup-canva` to log in again.
+- **Do not** commit `canva_browser_data/` — it contains your login credentials.
+- If page detection fails, the automation falls back to exporting all pages.
+
 ### WhatsApp Web Session
 
 - The session is saved in `browser_data/` and persists between runs.
@@ -189,12 +198,15 @@ crontab -l
 
 ### How the Canva Download Works
 
-The automation uses the Canva Connect API:
-1. Extracts the design ID from your URL
-2. Creates an export job via `POST /v1/exports` (format: JPG)
-3. Polls the job status until complete
-4. Downloads the exported file(s) — ZIP for multi-page designs, single JPG otherwise
-5. Extracts images to `downloads/extracted/`
+The automation uses a hybrid Playwright + API approach:
+1. Opens the Canva editor in headless Chromium to detect which pages are visible (hidden pages are skipped)
+2. Extracts the design ID from your URL
+3. Creates an export job via the Canva Connect API (`POST /v1/exports`) for only the visible pages
+4. Polls the job status until complete
+5. Downloads the exported file(s) — ZIP for multi-page designs, single JPG otherwise
+6. Extracts images to `downloads/extracted/`
+
+If page visibility detection fails (e.g., Canva session expired), all pages are exported as a fallback.
 
 ### Rate Limiting
 
@@ -209,8 +221,8 @@ The automation uses the Canva Connect API:
 
 ## Troubleshooting
 
-### "No Canva tokens found"
-- Run `python main.py --setup-canva` to authorize the Canva API.
+### "No Canva tokens found" / "No Canva browser session found"
+- Run `python main.py --setup-canva` to authorize the API and log in via the browser.
 
 ### "Canva API returned 401 Unauthorized"
 - Your tokens may have expired. Run `python main.py --setup-canva` to re-authorize.
@@ -235,5 +247,5 @@ The automation uses the Canva Connect API:
 - Verify cron service is running: `sudo systemctl status cron`
 
 ### Session issues after server restart
-- `canva_tokens.json` and `browser_data/` should survive restarts.
+- `canva_tokens.json`, `canva_browser_data/`, and `browser_data/` should survive restarts.
 - If they don't, run `--setup-canva` and `--setup-wap` to re-authenticate.

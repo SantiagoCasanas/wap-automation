@@ -8,8 +8,10 @@ venv/
 # Environment
 .env
 CLAUDE.md
-# Browser session data (WhatsApp Web)
+
+# Browser session data
 browser_data/
+canva_browser_data/
 
 # Canva API tokens
 canva_tokens.json

@@ -1,9 +1,8 @@
 """
-Canva Page Downloader (API-based)
+Canva Page Downloader (Hybrid: Playwright + API)
 
-Uses the Canva Connect API to export all pages of a design as JPG images.
-Authenticates via OAuth 2.0 with PKCE. Tokens are persisted to
-canva_tokens.json for reuse across runs.
+Uses Playwright to detect which pages are visible (not hidden) in the
+Canva editor, then exports only those pages via the Canva Connect API.
 
 Setup:
     1. Create an integration at https://www.canva.dev
@@ -24,11 +23,13 @@ import zipfile
 from pathlib import Path
 
 import requests
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 logger = logging.getLogger(__name__)
 
 DOWNLOADS_DIR = Path(__file__).parent / "downloads"
 TOKEN_FILE = Path(__file__).parent / "canva_tokens.json"
+CANVA_BROWSER_DATA = Path(__file__).parent / "canva_browser_data"
 
 CANVA_AUTH_URL = "https://www.canva.com/api/oauth/authorize"
 CANVA_TOKEN_URL = "https://api.canva.com/rest/v1/oauth/token"
@@ -138,11 +139,45 @@ def _get_access_token() -> str:
 # Setup: OAuth authorization flow
 # ---------------------------------------------------------------------------
 
+def setup_canva_browser():
+    """
+    Open a visible Chromium browser for the user to log into Canva.
+    The session is saved to canva_browser_data/ for future headless use.
+    """
+    logger.info("Opening Canva for browser login...")
+    logger.info("Log in to your Canva account, then close the browser.")
+
+    CANVA_BROWSER_DATA.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as p:
+        context = p.chromium.launch_persistent_context(
+            user_data_dir=str(CANVA_BROWSER_DATA),
+            headless=False,
+            viewport={"width": 1280, "height": 900},
+        )
+        page = context.new_page()
+        page.goto("https://www.canva.com/login", wait_until="domcontentloaded")
+
+        logger.info("Please log in to Canva in the browser window.")
+        logger.info("Once you are logged in, close the browser window.")
+
+        # Wait until the user closes the browser
+        try:
+            page.wait_for_event("close", timeout=300_000)
+        except PlaywrightTimeout:
+            pass
+        except Exception:
+            pass
+
+        context.close()
+
+    logger.info("Canva browser session saved to canva_browser_data/")
+
+
 def setup_canva_login():
     """
-    Run the OAuth 2.0 authorization flow with PKCE.
-    Opens the user's browser to Canva for authorization, then captures
-    the callback on a local HTTP server.
+    Run the OAuth 2.0 authorization flow with PKCE, then open a browser
+    for Canva login (needed for page visibility detection).
     """
     client_id = os.getenv("CANVA_CLIENT_ID")
     client_secret = os.getenv("CANVA_CLIENT_SECRET")
@@ -257,53 +292,214 @@ def setup_canva_login():
 
     logger.info("Canva API authorization complete! Tokens saved.")
 
+    # Also set up the browser session for page visibility detection
+    logger.info("\n--- Now setting up Canva browser session ---")
+    logger.info("This is needed to detect which pages are visible in your design.")
+    setup_canva_browser()
+
+
+# ---------------------------------------------------------------------------
+# Detect visible pages via Playwright
+# ---------------------------------------------------------------------------
+
+def _detect_visible_pages(canva_url: str, headless: bool = True) -> list[int] | None:
+    """
+    Open the Canva editor and detect which pages are visible (not hidden).
+
+    Returns a list of 1-indexed page numbers that are visible, or None if
+    detection fails (in which case all pages will be exported).
+    """
+    design_id = _extract_design_id(canva_url)
+    # Convert URL to edit mode
+    edit_url = f"https://www.canva.com/design/{design_id}/edit"
+
+    if not CANVA_BROWSER_DATA.exists():
+        logger.warning(
+            "No Canva browser session found. Run 'python main.py --setup-canva' "
+            "to log in. Exporting all pages."
+        )
+        return None
+
+    logger.info("Detecting visible pages via Canva editor...")
+
+    try:
+        with sync_playwright() as p:
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=str(CANVA_BROWSER_DATA),
+                headless=headless,
+                viewport={"width": 1280, "height": 900},
+            )
+            page = context.new_page()
+            page.goto(edit_url, wait_until="domcontentloaded", timeout=60_000)
+
+            # Wait for the editor to fully load (toolbar or canvas)
+            page.wait_for_selector(
+                '[class*="toolbar"], [class*="editor"], [data-testid*="editor"]',
+                timeout=30_000,
+            )
+            # Give the page panel time to render
+            page.wait_for_timeout(3000)
+
+            # Try to open the page/grid panel if not already visible
+            # Canva has a "Grid View" or page list in the bottom or side panel
+            # Look for page thumbnails
+            visible_pages = _read_page_visibility(page)
+
+            context.close()
+            return visible_pages
+
+    except PlaywrightTimeout:
+        logger.warning("Canva editor timed out. Will export all pages.")
+        return None
+    except Exception as e:
+        logger.warning(f"Page detection failed: {e}. Will export all pages.")
+        return None
+
+
+def _read_page_visibility(page) -> list[int] | None:
+    """
+    Read page thumbnails from the Canva editor and determine which are visible.
+
+    Canva marks hidden pages with aria-label containing 'Hidden' or a
+    hide/show icon overlay on the page thumbnail. This function inspects
+    the page grid/list to find visible (non-hidden) pages.
+    """
+    # Strategy 1: Look for page thumbnails in the bottom page navigator
+    # Each page thumbnail is typically in a container with page number info
+    page_items = page.query_selector_all(
+        '[class*="page_thumbnail"], '
+        '[class*="pageThumbnail"], '
+        '[data-testid*="page-thumbnail"], '
+        '[class*="grid_page"], '
+        '[class*="gridPage"]'
+    )
+
+    if not page_items:
+        # Strategy 2: Try the bottom page navigation bar
+        # Click on the page grid button if it exists
+        grid_btn = page.query_selector(
+            '[aria-label*="Grid"], '
+            '[aria-label*="grid"], '
+            '[data-testid*="grid-view"], '
+            '[class*="page_grid_button"], '
+            '[aria-label*="pages"], '
+            '[aria-label*="Pages"]'
+        )
+        if grid_btn:
+            grid_btn.click()
+            page.wait_for_timeout(2000)
+            page_items = page.query_selector_all(
+                '[class*="page_thumbnail"], '
+                '[class*="pageThumbnail"], '
+                '[data-testid*="page-thumbnail"], '
+                '[class*="grid_page"], '
+                '[class*="gridPage"]'
+            )
+
+    if not page_items:
+        # Strategy 3: Look for any thumbnail-like containers in the footer/nav
+        page_items = page.query_selector_all(
+            '#pages-scrubber [role="listitem"], '
+            '[class*="scrubber"] [role="listitem"], '
+            '[class*="PageScrubber"] [role="listitem"], '
+            '[class*="footer"] [role="listitem"]'
+        )
+
+    if not page_items:
+        logger.warning("Could not locate page thumbnails in the editor.")
+        # Fallback: try to extract from the page using JavaScript
+        result = page.evaluate("""
+            () => {
+                // Look for elements with 'hidden' indicators
+                const allEls = document.querySelectorAll('[aria-label*="Page"]');
+                if (allEls.length === 0) return null;
+
+                const pages = [];
+                allEls.forEach((el, i) => {
+                    const label = el.getAttribute('aria-label') || '';
+                    const isHidden = label.toLowerCase().includes('hidden') ||
+                                     el.querySelector('[aria-label*="Hidden"]') !== null ||
+                                     el.querySelector('[aria-label*="hidden"]') !== null;
+                    pages.push({ index: i + 1, hidden: isHidden, label: label });
+                });
+                return pages.length > 0 ? pages : null;
+            }
+        """)
+
+        if result:
+            visible = [p["index"] for p in result if not p["hidden"]]
+            total = len(result)
+            logger.info(f"Detected {len(visible)} visible pages out of {total} total (JS fallback)")
+            return visible if visible else None
+
+        logger.warning("Page visibility detection failed. Will export all pages.")
+        return None
+
+    # Process found page items
+    total = len(page_items)
+    visible_pages = []
+
+    for i, item in enumerate(page_items, 1):
+        # Check for hidden indicators
+        is_hidden = False
+
+        # Check aria-label for 'hidden'
+        aria_label = item.get_attribute("aria-label") or ""
+        if "hidden" in aria_label.lower():
+            is_hidden = True
+
+        # Check for hidden icon overlay (eye-slash icon)
+        if not is_hidden:
+            hidden_indicator = item.query_selector(
+                '[aria-label*="Hidden"], '
+                '[aria-label*="hidden"], '
+                '[class*="hidden"], '
+                '[class*="Hidden"], '
+                '[data-testid*="hidden"]'
+            )
+            if hidden_indicator:
+                is_hidden = True
+
+        # Check opacity (hidden pages often have reduced opacity)
+        if not is_hidden:
+            opacity = item.evaluate("el => window.getComputedStyle(el).opacity")
+            if opacity and float(opacity) < 0.5:
+                is_hidden = True
+
+        if not is_hidden:
+            visible_pages.append(i)
+
+    logger.info(f"Detected {len(visible_pages)} visible pages out of {total} total")
+
+    if len(visible_pages) == 0:
+        logger.warning("All pages appear hidden — exporting all as fallback.")
+        return None
+
+    return visible_pages
+
 
 # ---------------------------------------------------------------------------
 # Export design pages via API
 # ---------------------------------------------------------------------------
 
-def get_visible_pages(canva_url: str) -> list[int]:
-    """
-    Get all visible (non-hidden) page indices for a Canva design.
-    The API's get-design-pages endpoint already excludes hidden pages.
-    Returns a list of 1-based page indices.
-    """
-    design_id = _extract_design_id(canva_url)
-    access_token = _get_access_token()
-    headers = {"Authorization": f"Bearer {access_token}"}
-    pages = []
-    offset = 1
-    limit = 100
-
-    while True:
-        resp = requests.get(
-            f"{CANVA_API_BASE}/designs/{design_id}/pages",
-            headers=headers,
-            params={"offset": offset, "limit": limit},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        items = data.get("items", [])
-        if not items:
-            break
-        for item in items:
-            pages.append(item)
-        if len(items) < limit:
-            break
-        offset += limit
-
-    logger.info(f"Design {design_id}: {len(pages)} visible page(s)")
-    return pages
-
-
 def _create_export_job(access_token: str, design_id: str, pages: list[int] | None = None) -> str:
-    """Create an export job and return the job ID."""
+    """Create an export job and return the job ID.
+
+    Args:
+        access_token: Valid Canva API access token.
+        design_id: The Canva design ID.
+        pages: Optional list of 1-indexed page numbers to export.
+               If None, all pages are exported.
+    """
     format_opts = {
         "type": "jpg",
         "quality": 100,
     }
     if pages:
         format_opts["pages"] = pages
+        logger.info(f"Exporting pages: {pages}")
+    else:
+        logger.info("Exporting all pages")
 
     resp = requests.post(
         CANVA_EXPORT_URL,
@@ -418,14 +614,14 @@ def _download_files(urls: list[str]) -> list[str]:
 
 def download_pages(canva_url: str, headless: bool = True) -> list[str]:
     """
-    Download all pages from a Canva design using the Canva Connect API.
+    Download visible pages from a Canva design.
 
-    Exports the design as JPG via the API, downloads the resulting files,
-    and returns a list of local image paths.
+    Uses Playwright to detect which pages are visible (not hidden) in the
+    editor, then exports only those pages via the Canva Connect API.
 
     Args:
         canva_url: Canva design URL (view or edit link)
-        headless: Ignored (kept for backward compatibility with main.py)
+        headless: Whether to run the detection browser in headless mode
 
     Returns:
         List of file paths to downloaded images
@@ -435,19 +631,23 @@ def download_pages(canva_url: str, headless: bool = True) -> list[str]:
     design_id = _extract_design_id(canva_url)
     logger.info(f"Design ID: {design_id}")
 
-    # Get valid access token (auto-refreshes if expired)
+    # Step 1: Detect which pages are visible via Playwright
+    visible_pages = _detect_visible_pages(canva_url, headless=headless)
+    if visible_pages:
+        logger.info(f"Visible pages: {visible_pages}")
+    else:
+        logger.info("Could not detect page visibility — exporting all pages")
+
+    # Step 2: Get valid access token (auto-refreshes if expired)
     access_token = _get_access_token()
 
-    # Get only visible (non-hidden) pages
-    visible_pages = get_visible_pages(canva_url)
-
-    # Create export job with visible pages only
+    # Step 3: Create export job (only visible pages if detected)
     job_id = _create_export_job(access_token, design_id, pages=visible_pages)
 
-    # Poll until complete
+    # Step 4: Poll until complete
     download_urls = _poll_export_job(access_token, job_id)
 
-    # Download files
+    # Step 5: Download files
     image_paths = _download_files(download_urls)
 
     logger.info(f"Downloaded {len(image_paths)} page(s)")
