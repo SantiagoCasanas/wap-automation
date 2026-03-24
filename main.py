@@ -51,7 +51,7 @@ def parse_args():
     parser.add_argument(
         "--setup-canva",
         action="store_true",
-        help="Open Canva for first-time login",
+        help="Authorize Canva API access (one-time OAuth flow)",
     )
     parser.add_argument(
         "--setup-wap",

@@ -8,9 +8,11 @@ venv/
 # Environment
 .env
 
-# Browser session data (WhatsApp Web + Canva)
+# Browser session data (WhatsApp Web)
 browser_data/
-canva_browser_data/
+
+# Canva API tokens
+canva_tokens.json
 
 # Downloaded images
 downloads/
