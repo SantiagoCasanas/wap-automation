@@ -2,13 +2,14 @@
 """
 Canva to WhatsApp Status Automation
 
-Downloads every page from a public Canva design and posts
-each page as a WhatsApp status image.
+Logs into Canva, downloads every page of a design as JPG (x2, quality 100),
+then posts each image as a WhatsApp status.
 
 Usage:
     python main.py                  # Run with .env config
     python main.py --url <URL>      # Override Canva URL
-    python main.py --setup          # First-time WhatsApp login
+    python main.py --setup-canva    # First-time Canva login
+    python main.py --setup-wap      # First-time WhatsApp Web login
     python main.py --download-only  # Only download images (skip posting)
 """
 
@@ -20,8 +21,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 import os
 
-from canva_downloader import download_pages
-from wap_status_poster import post_statuses, setup_login
+from canva_downloader import download_pages, setup_canva_login
+from wap_status_poster import post_statuses, setup_login as setup_wap_login
 
 # Load environment variables
 load_dotenv()
@@ -45,10 +46,15 @@ def parse_args():
         "--url",
         type=str,
         default=None,
-        help="Public Canva design URL (overrides .env)",
+        help="Canva design URL (overrides .env)",
     )
     parser.add_argument(
-        "--setup",
+        "--setup-canva",
+        action="store_true",
+        help="Open Canva for first-time login",
+    )
+    parser.add_argument(
+        "--setup-wap",
         action="store_true",
         help="Open WhatsApp Web for first-time login",
     )
@@ -68,10 +74,15 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # First-time WhatsApp login
-    if args.setup:
+    # Setup flows
+    if args.setup_canva:
+        logger.info("=== Canva Login Setup ===")
+        setup_canva_login()
+        return
+
+    if args.setup_wap:
         logger.info("=== WhatsApp Web Setup ===")
-        setup_login()
+        setup_wap_login()
         return
 
     # Get Canva URL
@@ -97,7 +108,7 @@ def main():
         sys.exit(1)
 
     if not image_paths:
-        logger.error("No images downloaded. Check if the Canva URL is correct and public.")
+        logger.error("No images downloaded. Check the Canva URL and your login session.")
         sys.exit(1)
 
     logger.info(f"Downloaded {len(image_paths)} page(s)")
