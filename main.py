@@ -11,6 +11,7 @@ Usage:
     python main.py --setup-canva    # First-time Canva login
     python main.py --setup-wap      # First-time WhatsApp Web login
     python main.py --download-only  # Only download images (skip posting)
+    python main.py --list-pages     # List visible (non-hidden) pages
 """
 
 import argparse
@@ -21,7 +22,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 import os
 
-from canva_downloader import download_pages, setup_canva_login
+from canva_downloader import download_pages, setup_canva_login, get_visible_pages
 from wap_status_poster import post_statuses, setup_login as setup_wap_login
 
 # Load environment variables
@@ -64,6 +65,11 @@ def parse_args():
         help="Only download Canva images, skip WhatsApp posting",
     )
     parser.add_argument(
+        "--list-pages",
+        action="store_true",
+        help="List visible (non-hidden) pages of the Canva design",
+    )
+    parser.add_argument(
         "--no-headless",
         action="store_true",
         help="Run browsers in visible mode (for debugging)",
@@ -90,6 +96,18 @@ def main():
     if not canva_url:
         logger.error("No Canva URL provided. Set CANVA_URL in .env or use --url")
         sys.exit(1)
+
+    # List pages command
+    if args.list_pages:
+        logger.info(f"=== Visible Pages for: {canva_url} ===")
+        try:
+            pages = get_visible_pages(canva_url)
+            logger.info(f"Total visible pages: {len(pages)}")
+            logger.info(f"Page indices: {pages}")
+        except Exception as e:
+            logger.error(f"Failed to get pages: {e}")
+            sys.exit(1)
+        return
 
     # Config
     headless = not args.no_headless and os.getenv("HEADLESS", "true").lower() == "true"

@@ -45,7 +45,7 @@ SCOPES = "design:content:read design:meta:read"
 def _clean_downloads():
     """Remove all previous downloads to avoid stale images."""
     if DOWNLOADS_DIR.exists():
-        shutil.rmtree(DOWNLOADS_DIR)
+        shutil.rmtree(DOWNLOADS_DIR, ignore_errors=True)
     DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -262,8 +262,49 @@ def setup_canva_login():
 # Export design pages via API
 # ---------------------------------------------------------------------------
 
-def _create_export_job(access_token: str, design_id: str) -> str:
+def get_visible_pages(canva_url: str) -> list[int]:
+    """
+    Get all visible (non-hidden) page indices for a Canva design.
+    The API's get-design-pages endpoint already excludes hidden pages.
+    Returns a list of 1-based page indices.
+    """
+    design_id = _extract_design_id(canva_url)
+    access_token = _get_access_token()
+    headers = {"Authorization": f"Bearer {access_token}"}
+    pages = []
+    offset = 1
+    limit = 100
+
+    while True:
+        resp = requests.get(
+            f"{CANVA_API_BASE}/designs/{design_id}/pages",
+            headers=headers,
+            params={"offset": offset, "limit": limit},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        items = data.get("items", [])
+        if not items:
+            break
+        for item in items:
+            pages.append(item)
+        if len(items) < limit:
+            break
+        offset += limit
+
+    logger.info(f"Design {design_id}: {len(pages)} visible page(s)")
+    return pages
+
+
+def _create_export_job(access_token: str, design_id: str, pages: list[int] | None = None) -> str:
     """Create an export job and return the job ID."""
+    format_opts = {
+        "type": "jpg",
+        "quality": 100,
+    }
+    if pages:
+        format_opts["pages"] = pages
+
     resp = requests.post(
         CANVA_EXPORT_URL,
         headers={
@@ -272,9 +313,7 @@ def _create_export_job(access_token: str, design_id: str) -> str:
         },
         json={
             "design_id": design_id,
-            "format": {
-                "type": "jpg",
-            },
+            "format": format_opts,
         },
     )
 
@@ -284,7 +323,9 @@ def _create_export_job(access_token: str, design_id: str) -> str:
             "Run 'python main.py --setup-canva' to re-authorize."
         )
 
-    resp.raise_for_status()
+    if not resp.ok:
+        logger.error(f"Export API error {resp.status_code}: {resp.text}")
+        resp.raise_for_status()
     data = resp.json()
     job_id = data["job"]["id"]
     logger.info(f"Export job created: {job_id}")
@@ -309,7 +350,12 @@ def _poll_export_job(access_token: str, job_id: str, timeout: int = 120) -> list
         status = data["job"]["status"]
 
         if status == "success":
-            urls = [u["url"] for u in data["job"]["urls"]]
+            raw_urls = data["job"]["urls"]
+            # URLs may be plain strings or dicts with "url" key
+            if raw_urls and isinstance(raw_urls[0], str):
+                urls = raw_urls
+            else:
+                urls = [u["url"] for u in raw_urls]
             logger.info(f"Export complete: {len(urls)} file(s) ready")
             return urls
         elif status == "failed":
@@ -392,8 +438,11 @@ def download_pages(canva_url: str, headless: bool = True) -> list[str]:
     # Get valid access token (auto-refreshes if expired)
     access_token = _get_access_token()
 
-    # Create export job
-    job_id = _create_export_job(access_token, design_id)
+    # Get only visible (non-hidden) pages
+    visible_pages = get_visible_pages(canva_url)
+
+    # Create export job with visible pages only
+    job_id = _create_export_job(access_token, design_id, pages=visible_pages)
 
     # Poll until complete
     download_urls = _poll_export_job(access_token, job_id)

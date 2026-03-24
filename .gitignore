@@ -7,7 +7,7 @@ venv/
 
 # Environment
 .env
-
+CLAUDE.md
 # Browser session data (WhatsApp Web)
 browser_data/
 
