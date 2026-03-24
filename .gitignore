@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+
+# Environment
+.env
+CLAUDE.md
+# Browser session data (WhatsApp Web)
+browser_data/
+
+# Canva API tokens
+canva_tokens.json
+
+# Downloaded images
+downloads/
+
+# Logs
+*.log
