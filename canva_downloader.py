@@ -6,7 +6,8 @@ download feature to export all pages as JPG (size x2, quality 100).
 Downloads a ZIP file, extracts the images.
 
 Uses a persistent browser context (canva_browser_data/) to keep the
-Canva session alive between runs.
+Canva session alive between runs. Uses stealth mode to bypass
+Cloudflare bot detection.
 """
 
 import glob
@@ -18,11 +19,21 @@ import zipfile
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+from playwright_stealth import stealth_sync
 
 logger = logging.getLogger(__name__)
 
 DOWNLOADS_DIR = Path(__file__).parent / "downloads"
 CANVA_BROWSER_DATA = Path(__file__).parent / "canva_browser_data"
+
+# Chrome args to bypass bot detection (Cloudflare, etc.)
+STEALTH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-infobars",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-dev-shm-usage",
+]
 
 
 def _clean_downloads():
@@ -390,9 +401,11 @@ def download_pages(canva_url: str, headless: bool = True) -> list[str]:
                 "Chrome/131.0.0.0 Safari/537.36"
             ),
             accept_downloads=True,
+            args=STEALTH_ARGS,
         )
 
         page = context.new_page()
+        stealth_sync(page)
 
         try:
             page.goto(edit_url, wait_until="domcontentloaded", timeout=60000)
@@ -453,9 +466,11 @@ def setup_canva_login():
             user_data_dir=str(CANVA_BROWSER_DATA),
             headless=False,
             viewport={"width": 1280, "height": 900},
+            args=STEALTH_ARGS,
         )
 
         page = context.new_page()
+        stealth_sync(page)
         page.goto("https://www.canva.com/login", wait_until="domcontentloaded")
 
         logger.info("Waiting for login... (will wait up to 5 minutes)")
